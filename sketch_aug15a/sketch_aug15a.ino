@@ -1,40 +1,55 @@
-// --- 1) ライブラリ取り込み ---
+// --- 4ch ロードセル対応版 ---
 #include "HX711.h"
 
-// --- 2) ピン定義（衝突回避のため名前を変更） ---
-const int HX_DOUT_PIN = 8;   // HX711のDAT → Arduino D8（入力）
-const int HX_SCK_PIN  = 9;   // HX711のCLK → Arduino D9（出力）
+// --- 4ch分のピン定義 ---
+const int DOUT_PINS[4] = {2, 4, 6, 8};   // HX711 DAT pins
+const int SCK_PINS[4]  = {3, 5, 7, 9};   // HX711 CLK pins
 
-// --- 3) HX711オブジェクト ---
-HX711 scale;
-
-// --- 4) 校正係数 ---
-float calibration_factor = 1000.0f;
+// --- 4個のHX711オブジェクト ---
+HX711 scales[4];
 
 void setup() {
   Serial.begin(115200);
 
-  // HX711初期化（ピン指定）
-  scale.begin(HX_DOUT_PIN, HX_SCK_PIN);
+  // 4ch分のHX711初期化
+  for (int i = 0; i < 4; i++) {
+    scales[i].begin(DOUT_PINS[i], SCK_PINS[i]);
+  }
 
-  delay(1000);   // 安定待ち
-  scale.tare();  // 風袋ゼロ
+  delay(2000);   // 十分な安定待ち
 
-  Serial.println("millis,grams"); // CSVヘッダ
+  // 4ch分の風袋ゼロ
+  for (int i = 0; i < 4; i++) {
+    scales[i].tare();
+  }
+
+  // CSVヘッダ（rawデータのみ）
+  Serial.println("millis,raw_ch1,raw_ch2,raw_ch3,raw_ch4");
 }
 
 void loop() {
-  // 新データ準備待ち
-  if (!scale.is_ready()) return;
+  // 全ch準備完了チェック
+  bool all_ready = true;
+  for (int i = 0; i < 4; i++) {
+    if (!scales[i].is_ready()) {
+      all_ready = false;
+      break;
+    }
+  }
+  
+  if (!all_ready) return;
 
-  // 10回平均でノイズ低減
-  long raw = scale.read_average(10);
-
-  // g換算（後で調整）
-  double grams = raw / calibration_factor;
-
-  // CSVで出力
+  // タイムスタンプ
   Serial.print(millis());
-  Serial.print(",");
-  Serial.println(grams, 3);
+
+  // 4ch分のrawデータ取得・出力
+  for (int i = 0; i < 4; i++) {
+    long raw = scales[i].read_average(5);  // 高速化のため5回平均
+    Serial.print(",");
+    Serial.print(raw);
+  }
+  
+  Serial.println();
+  
+  delay(50);  // 20Hz sampling
 }
