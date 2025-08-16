@@ -13,7 +13,8 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QHBoxLayo
                                QWidget, QPushButton, QLabel, QLineEdit, QComboBox,
                                QSpinBox, QGroupBox, QGridLayout, QFileDialog,
                                QMessageBox, QStatusBar, QSplitter, QFrame,
-                               QDoubleSpinBox, QButtonGroup, QRadioButton, QDialog)
+                               QDoubleSpinBox, QButtonGroup, QRadioButton, QDialog,
+                               QCheckBox, QTabWidget, QTextEdit, QScrollArea, QInputDialog)
 from PySide6.QtCore import QTimer, Qt, Signal, QThread
 from PySide6.QtGui import QFont, QIcon, QPalette, QColor
 
@@ -23,90 +24,71 @@ from matplotlib.figure import Figure
 from matplotlib.animation import FuncAnimation
 import serial
 
-# 日本語フォント設定（確実に存在するフォントを使用）
+# 日本語フォント設定
 plt.rcParams['font.family'] = ['DejaVu Sans', 'MS Gothic', 'Yu Gothic', 'Meiryo']
 
-class CalibrationDialog(QDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("校正設定")
-        self.setModal(True)
-        self.setFixedSize(400, 300)
-        
-        layout = QVBoxLayout(self)
-        
-        # 校正モード選択
-        mode_group = QGroupBox("校正モード選択")
-        mode_layout = QVBoxLayout(mode_group)
-        
-        self.mode_group = QButtonGroup()
-        self.zero_only_radio = QRadioButton("ゼロ点補正のみ")
-        self.one_point_radio = QRadioButton("1点校正（推奨）")
-        self.two_point_radio = QRadioButton("2点校正（高精度）")
-        
-        self.zero_only_radio.setChecked(True)
-        
-        self.mode_group.addButton(self.zero_only_radio, 0)
-        self.mode_group.addButton(self.one_point_radio, 1)
-        self.mode_group.addButton(self.two_point_radio, 2)
-        
-        mode_layout.addWidget(self.zero_only_radio)
-        mode_layout.addWidget(self.one_point_radio)
-        mode_layout.addWidget(self.two_point_radio)
-        
-        layout.addWidget(mode_group)
-        
-        # 校正値設定
-        cal_group = QGroupBox("校正値設定")
-        cal_layout = QGridLayout(cal_group)
-        
-        cal_layout.addWidget(QLabel("既知重量1:"), 0, 0)
-        self.weight1_spin = QDoubleSpinBox()
-        self.weight1_spin.setRange(0.001, 10000)
-        self.weight1_spin.setValue(100.0)
-        self.weight1_spin.setSuffix(" g")
-        cal_layout.addWidget(self.weight1_spin, 0, 1)
-        
-        cal_layout.addWidget(QLabel("既知重量2:"), 1, 0)
-        self.weight2_spin = QDoubleSpinBox()
-        self.weight2_spin.setRange(0.001, 10000)
-        self.weight2_spin.setValue(500.0)
-        self.weight2_spin.setSuffix(" g")
-        cal_layout.addWidget(self.weight2_spin, 1, 1)
-        
-        layout.addWidget(cal_group)
-        
-        # ボタン
-        button_layout = QHBoxLayout()
-        self.ok_btn = QPushButton("OK")
-        self.cancel_btn = QPushButton("キャンセル")
-        
-        self.ok_btn.clicked.connect(self.accept)
-        self.cancel_btn.clicked.connect(self.reject)
-        
-        button_layout.addWidget(self.ok_btn)
-        button_layout.addWidget(self.cancel_btn)
-        
-        layout.addLayout(button_layout)
-        
-        # モード変更時の処理
-        self.mode_group.buttonClicked.connect(self.on_mode_changed)
-        self.on_mode_changed()
+class ChannelCalibration:
+    """HX711標準校正方式に完全準拠した校正クラス"""
+    def __init__(self):
+        self.zero_point = 0.0           # Tare時のraw値
+        self.calibration_factor = 1000.0  # 初期値（従来のcalibration_factor）
+        self.is_calibrated = False      # 校正済みフラグ
+        self.is_tared = False          # ゼロ点設定済みフラグ
     
-    def on_mode_changed(self):
-        mode = self.mode_group.checkedId()
-        self.weight1_spin.setEnabled(mode >= 1)
-        self.weight2_spin.setEnabled(mode == 2)
+    def tare(self, raw_values):
+        """ゼロ点設定（風袋引き）"""
+        if len(raw_values) < 5:
+            raise ValueError("データが不足しています")
+        
+        self.zero_point = np.mean(raw_values)
+        self.is_tared = True
+        
+    def calibrate_with_weight(self, raw_values, known_weight):
+        """既知重量での校正"""
+        if not self.is_tared:
+            raise ValueError("先にゼロ点設定（Tare）を実行してください")
+        
+        if known_weight <= 0:
+            raise ValueError("重量は正の値である必要があります")
+        
+        if len(raw_values) < 5:
+            raise ValueError("データが不足しています")
+        
+        current_raw = np.mean(raw_values)
+        raw_change = current_raw - self.zero_point
+        
+        if abs(raw_change) < 10:  # 変化が小さすぎる
+            raise ValueError("重量変化が検出できません。より重い重りを使用してください")
+        
+        # HX711標準公式: calibration_factor = raw値の変化 / 既知重量
+        self.calibration_factor = raw_change / known_weight
+        self.is_calibrated = True
     
-    def get_calibration_settings(self):
+    def get_weight(self, raw_value):
+        """HX711標準公式: Weight(g) = (RawValue - ZeroPoint) / CalibrationFactor"""
+        if not self.is_tared:
+            return 0.0  # ゼロ点未設定時は0を返す
+        
+        return (raw_value - self.zero_point) / self.calibration_factor
+    
+    def to_dict(self):
+        """辞書形式でエクスポート"""
         return {
-            'mode': self.mode_group.checkedId(),
-            'weight1': self.weight1_spin.value(),
-            'weight2': self.weight2_spin.value()
+            'zero_point': self.zero_point,
+            'calibration_factor': self.calibration_factor,
+            'is_calibrated': self.is_calibrated,
+            'is_tared': self.is_tared
         }
+    
+    def from_dict(self, data):
+        """辞書から読み込み"""
+        self.zero_point = data.get('zero_point', 0.0)
+        self.calibration_factor = data.get('calibration_factor', 1000.0)
+        self.is_calibrated = data.get('is_calibrated', False)
+        self.is_tared = data.get('is_tared', False)
 
 class SerialWorker(QThread):
-    data_received = Signal(float, float)  # time, value
+    data_received = Signal(float, list)  # time, [raw_ch1, raw_ch2, raw_ch3, raw_ch4]
     error_occurred = Signal(str)
     
     def __init__(self, port, baud):
@@ -128,8 +110,8 @@ class SerialWorker(QThread):
                         line_str = line_bytes.decode("utf-8", errors='ignore')
                         parsed = self.parse_csv(line_str)
                         if parsed:
-                            t_ms, g = parsed
-                            self.data_received.emit(t_ms/1000.0, g)
+                            t_ms, ch_data = parsed
+                            self.data_received.emit(t_ms/1000.0, ch_data)
                     except Exception as e:
                         continue
                 self.msleep(10)
@@ -144,8 +126,11 @@ class SerialWorker(QThread):
         try:
             line_str = line_str.strip()
             if ',' in line_str and not line_str.startswith('millis'):
-                ms_str, g_str = line_str.split(",", 1)
-                return float(ms_str), float(g_str)
+                parts = line_str.split(",")
+                if len(parts) >= 5:  # millis + 4ch
+                    ms_str = parts[0]
+                    ch_data = [float(parts[i]) for i in range(1, 5)]
+                    return float(ms_str), ch_data
         except:
             pass
         return None
@@ -155,101 +140,113 @@ class SerialWorker(QThread):
         if self.ser:
             self.ser.close()
 
-class ModernPlotWidget(FigureCanvas):
+class MultiChannelPlotWidget(FigureCanvas):
     def __init__(self, parent=None):
-        self.fig = Figure(figsize=(12, 6), facecolor='#2b2b2b')
+        self.fig = Figure(figsize=(14, 8), facecolor='#2b2b2b')
         super().__init__(self.fig)
         self.setParent(parent)
         
-        # 日本語フォント設定
-        self.fig.patch.set_facecolor('#2b2b2b')
-        self.ax = self.fig.add_subplot(111, facecolor='#1e1e1e')
+        # 4チャンネル分のサブプロット
+        self.axes = []
+        self.lines = []
+        self.fills = []
         
-        # グラフのスタイリング
-        self.ax.set_xlabel('時間 [秒]', fontsize=12, color='white')
-        self.ax.set_ylabel('荷重 [g]', fontsize=12, color='white')
-        self.ax.set_title('リアルタイム荷重モニター', fontsize=14, color='white', pad=20)
+        colors = ['#00ff88', '#ff6b6b', '#4ecdc4', '#ffe66d']
         
-        # グリッドとスパイン
-        self.ax.grid(True, alpha=0.3, color='#555555')
-        for spine in self.ax.spines.values():
-            spine.set_color('#555555')
-        self.ax.tick_params(colors='white')
+        for i in range(4):
+            ax = self.fig.add_subplot(2, 2, i+1, facecolor='#1e1e1e')
+            ax.set_xlabel('時間 [秒]', fontsize=10, color='white')
+            ax.set_ylabel('荷重 [g]', fontsize=10, color='white')
+            ax.set_title(f'CH{i+1} リアルタイム荷重', fontsize=12, color='white')
+            
+            # グリッドとスパイン
+            ax.grid(True, alpha=0.3, color='#555555')
+            for spine in ax.spines.values():
+                spine.set_color('#555555')
+            ax.tick_params(colors='white', labelsize=8)
+            
+            # データライン
+            line, = ax.plot([], [], color=colors[i], linewidth=2, alpha=0.8)
+            
+            self.axes.append(ax)
+            self.lines.append(line)
+            self.fills.append(None)
         
-        # データライン
-        self.line, = self.ax.plot([], [], color='#00ff88', linewidth=2, alpha=0.8)
-        self.fill = None
+        self.fig.tight_layout(pad=2.0)
         
-        self.fig.tight_layout()
-        
-    def update_plot(self, x_data, y_data, window_sec):
+    def update_plot(self, x_data, y_data_channels, window_sec, enabled_channels):
         if not x_data:
             return
             
-        # データ更新
-        self.line.set_data(x_data, y_data)
-        
-        # 軸範囲更新
-        if x_data:
-            xmax = max(x_data)
-            xmin = max(0, xmax - window_sec)
-            self.ax.set_xlim(xmin, xmax + 0.5)
+        for ch in range(4):
+            if not enabled_channels[ch]:
+                # 無効なチャンネルはクリア
+                self.lines[ch].set_data([], [])
+                if self.fills[ch]:
+                    self.fills[ch].remove()
+                    self.fills[ch] = None
+                self.axes[ch].set_xlim(0, window_sec)
+                self.axes[ch].set_ylim(-10, 10)
+                continue
             
-        if y_data:
-            ymin, ymax = min(y_data), max(y_data)
-            if ymin == ymax:
-                ymin -= 1
-                ymax += 1
-            pad = (ymax - ymin) * 0.1
-            self.ax.set_ylim(ymin - pad, ymax + pad)
+            y_data = y_data_channels[ch]
             
-            # フィル効果追加
-            if self.fill:
-                self.fill.remove()
-            self.fill = self.ax.fill_between(x_data, y_data, alpha=0.2, color='#00ff88')
+            # データ更新
+            self.lines[ch].set_data(x_data, y_data)
+            
+            # 軸範囲更新
+            if x_data:
+                xmax = max(x_data)
+                xmin = max(0, xmax - window_sec)
+                self.axes[ch].set_xlim(xmin, xmax + 0.5)
+                
+            if y_data:
+                ymin, ymax = min(y_data), max(y_data)
+                if ymin == ymax:
+                    ymin -= 1
+                    ymax += 1
+                pad = (ymax - ymin) * 0.1
+                self.axes[ch].set_ylim(ymin - pad, ymax + pad)
+                
+                # フィル効果追加
+                if self.fills[ch]:
+                    self.fills[ch].remove()
+                colors = ['#00ff88', '#ff6b6b', '#4ecdc4', '#ffe66d']
+                self.fills[ch] = self.axes[ch].fill_between(x_data, y_data, alpha=0.2, color=colors[ch])
         
         self.draw()
     
     def clear_plot(self):
         """グラフをクリア"""
-        self.line.set_data([], [])
-        if self.fill:
-            self.fill.remove()
-            self.fill = None
-        self.ax.set_xlim(0, 30)
-        self.ax.set_ylim(-10, 10)
+        for ch in range(4):
+            self.lines[ch].set_data([], [])
+            if self.fills[ch]:
+                self.fills[ch].remove()
+                self.fills[ch] = None
+            self.axes[ch].set_xlim(0, 30)
+            self.axes[ch].set_ylim(-10, 10)
         self.draw()
 
 class LoadCellMonitor(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("ロードセル リアルタイムモニター v2.2")
-        self.setGeometry(100, 100, 1400, 900)
+        self.setWindowTitle("4チャンネル ロードセル モニター v3.1 - HX711標準校正対応")
+        self.setGeometry(100, 100, 1600, 1000)
         
-        # データバッファ
+        # 4チャンネル分のデータバッファ
         self.buf_t = collections.deque(maxlen=5000)
-        self.buf_g = collections.deque(maxlen=5000)
-        self.buf_g_calibrated = collections.deque(maxlen=5000)
+        self.buf_raw = [collections.deque(maxlen=5000) for _ in range(4)]  # 4ch分のRawデータ
+        self.buf_calibrated = [collections.deque(maxlen=5000) for _ in range(4)]  # 4ch分の校正済みデータ
+        
+        # チャンネル有効/無効
+        self.channel_enabled = [True, True, True, True]
+        
+        # 🆕 HX711標準校正方式対応
+        self.calibrations = [ChannelCalibration() for _ in range(4)]
         
         # 時間管理
         self.start_time = None
-        self.time_offset = 0
-        self.recording_start_time = None  # 記録開始時刻
-        
-        # 校正パラメータ
-        self.zero_offset = 0.0
-        self.scale_factor = 1.0
-        self.calibration_mode = 0  # 0: ゼロ点のみ, 1: 1点校正, 2: 2点校正
-        
-        # 校正データ
-        self.cal_raw_zero = 0.0
-        self.cal_raw_point1 = 0.0
-        self.cal_raw_point2 = 0.0
-        self.cal_weight1 = 100.0
-        self.cal_weight2 = 500.0
-        
-        # 設定ファイル
-        self.calibration_file = "calibration_settings.json"
+        self.recording_start_time = None
         
         # 設定
         self.window_sec = 30
@@ -261,7 +258,7 @@ class LoadCellMonitor(QMainWindow):
         
         self.setup_ui()
         self.setup_dark_theme()
-        self.load_calibration_settings()  # 起動時に校正設定読み込み
+        self.load_calibration_settings()
         
     def setup_ui(self):
         central_widget = QWidget()
@@ -270,24 +267,24 @@ class LoadCellMonitor(QMainWindow):
         # メインレイアウト
         main_layout = QHBoxLayout(central_widget)
         
-        # サイドパネル
-        side_panel = self.create_side_panel()
-        side_panel.setMaximumWidth(380)
-        side_panel.setMinimumWidth(350)
+        # コントロールパネル（タブ付き）
+        control_panel = self.create_control_panel()
+        control_panel.setMaximumWidth(400)
+        control_panel.setMinimumWidth(380)
         
         # プロットエリア
         plot_frame = QFrame()
         plot_frame.setFrameStyle(QFrame.StyledPanel)
         plot_layout = QVBoxLayout(plot_frame)
         
-        self.plot_widget = ModernPlotWidget()
+        self.plot_widget = MultiChannelPlotWidget()
         plot_layout.addWidget(self.plot_widget)
         
         # スプリッター
         splitter = QSplitter(Qt.Horizontal)
-        splitter.addWidget(side_panel)
+        splitter.addWidget(control_panel)
         splitter.addWidget(plot_frame)
-        splitter.setSizes([350, 1050])
+        splitter.setSizes([400, 1200])
         
         main_layout.addWidget(splitter)
         
@@ -300,16 +297,36 @@ class LoadCellMonitor(QMainWindow):
         self.update_timer = QTimer()
         self.update_timer.timeout.connect(self.update_display)
         self.update_timer.start(50)  # 20 FPS
-        
-    def create_side_panel(self):
+    
+    def create_control_panel(self):
         panel = QWidget()
         layout = QVBoxLayout(panel)
         
-        # タイトル
-        title = QLabel("🔧 コントロールパネル")
-        title.setFont(QFont("Arial", 16, QFont.Weight.Bold))
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(title)
+        # タブウィジェット
+        tab_widget = QTabWidget()
+        
+        # 接続タブ
+        connection_tab = self.create_connection_tab()
+        tab_widget.addTab(connection_tab, "🔌 接続")
+        
+        # チャンネル設定タブ
+        channel_tab = self.create_channel_tab()
+        tab_widget.addTab(channel_tab, "📊 チャンネル")
+        
+        # 校正タブ
+        calibration_tab = self.create_calibration_tab()
+        tab_widget.addTab(calibration_tab, "⚖️ 校正")
+        
+        # データタブ
+        data_tab = self.create_data_tab()
+        tab_widget.addTab(data_tab, "💾 データ")
+        
+        layout.addWidget(tab_widget)
+        return panel
+    
+    def create_connection_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
         
         # 接続設定
         conn_group = QGroupBox("📡 接続設定")
@@ -333,40 +350,6 @@ class LoadCellMonitor(QMainWindow):
         
         layout.addWidget(conn_group)
         
-        # 校正設定
-        cal_group = QGroupBox("⚖️ 校正・補正")
-        cal_layout = QVBoxLayout(cal_group)
-        
-        self.zero_btn = QPushButton("🎯 ゼロ点補正")
-        self.zero_btn.clicked.connect(self.perform_zero_calibration)
-        cal_layout.addWidget(self.zero_btn)
-        
-        self.calibrate_btn = QPushButton("⚙️ 校正設定")
-        self.calibrate_btn.clicked.connect(self.open_calibration_dialog)
-        cal_layout.addWidget(self.calibrate_btn)
-        
-        # 保存/読み込みボタン
-        cal_save_layout = QHBoxLayout()
-        self.save_cal_btn = QPushButton("💾 校正保存")
-        self.load_cal_btn = QPushButton("📂 校正読み込み")
-        self.save_cal_btn.clicked.connect(self.save_calibration_settings)
-        self.load_cal_btn.clicked.connect(self.load_calibration_dialog)
-        
-        cal_save_layout.addWidget(self.save_cal_btn)
-        cal_save_layout.addWidget(self.load_cal_btn)
-        cal_layout.addLayout(cal_save_layout)
-        
-        # 校正状態表示
-        self.cal_status_label = QLabel("状態: 未校正")
-        self.cal_offset_label = QLabel("オフセット: 0.0")
-        self.cal_scale_label = QLabel("スケール: 1.0")
-        
-        cal_layout.addWidget(self.cal_status_label)
-        cal_layout.addWidget(self.cal_offset_label)
-        cal_layout.addWidget(self.cal_scale_label)
-        
-        layout.addWidget(cal_group)
-        
         # 表示設定
         display_group = QGroupBox("📊 表示設定")
         display_layout = QGridLayout(display_group)
@@ -379,30 +362,146 @@ class LoadCellMonitor(QMainWindow):
         self.window_spin.valueChanged.connect(self.update_window_size)
         display_layout.addWidget(self.window_spin, 0, 1)
         
-        # グラフクリアボタン
         self.graph_clear_btn = QPushButton("📈 グラフクリア")
         self.graph_clear_btn.clicked.connect(self.clear_graph)
         display_layout.addWidget(self.graph_clear_btn, 1, 0, 1, 2)
         
         layout.addWidget(display_group)
+        layout.addStretch()
+        return tab
+    
+    def create_channel_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
         
-        # 統計表示
+        # チャンネル選択
+        channel_group = QGroupBox("📊 使用チャンネル選択")
+        channel_layout = QVBoxLayout(channel_group)
+        
+        self.channel_checkboxes = []
+        for i in range(4):
+            checkbox = QCheckBox(f"CH{i+1} 使用")
+            checkbox.setChecked(True)
+            checkbox.stateChanged.connect(lambda state, ch=i: self.toggle_channel(ch, state))
+            self.channel_checkboxes.append(checkbox)
+            channel_layout.addWidget(checkbox)
+        
+        layout.addWidget(channel_group)
+        
+        # 統計表示（4ch分）
         stats_group = QGroupBox("📈 リアルタイム統計")
-        stats_layout = QGridLayout(stats_group)
+        stats_layout = QVBoxLayout(stats_group)
         
-        self.current_label = QLabel("現在値: -- g")
-        self.max_label = QLabel("最大値: -- g")
-        self.min_label = QLabel("最小値: -- g")
-        self.avg_label = QLabel("平均値: -- g")
-        self.samples_label = QLabel("サンプル数: 0")
+        # スクロールエリア
+        scroll = QScrollArea()
+        scroll_widget = QWidget()
+        scroll_layout = QVBoxLayout(scroll_widget)
         
-        stats_layout.addWidget(self.current_label, 0, 0)
-        stats_layout.addWidget(self.max_label, 1, 0)
-        stats_layout.addWidget(self.min_label, 2, 0)
-        stats_layout.addWidget(self.avg_label, 3, 0)
-        stats_layout.addWidget(self.samples_label, 4, 0)
+        self.stats_labels = []
+        for i in range(4):
+            ch_frame = QFrame()
+            ch_frame.setFrameStyle(QFrame.Box)
+            ch_layout = QVBoxLayout(ch_frame)
+            
+            ch_title = QLabel(f"📊 CH{i+1}")
+            ch_title.setFont(QFont("Arial", 10, QFont.Weight.Bold))
+            ch_layout.addWidget(ch_title)
+            
+            labels = {
+                'current': QLabel("現在値: -- g"),
+                'max': QLabel("最大値: -- g"),
+                'min': QLabel("最小値: -- g"),
+                'avg': QLabel("平均値: -- g")
+            }
+            
+            for label in labels.values():
+                label.setFont(QFont("Arial", 8))
+                ch_layout.addWidget(label)
+            
+            self.stats_labels.append(labels)
+            scroll_layout.addWidget(ch_frame)
+        
+        scroll.setWidget(scroll_widget)
+        scroll.setWidgetResizable(True)
+        scroll.setMaximumHeight(300)
+        stats_layout.addWidget(scroll)
         
         layout.addWidget(stats_group)
+        layout.addStretch()
+        return tab
+    
+    def create_calibration_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        
+        # チャンネル別校正
+        cal_group = QGroupBox("⚖️ HX711標準校正方式")
+        cal_layout = QVBoxLayout(cal_group)
+        
+        # 校正手順説明
+        info_label = QLabel("📋 校正手順:\n①ゼロ点設定 → ②既知重量で校正")
+        info_label.setFont(QFont("Arial", 9))
+        info_label.setStyleSheet("color: #00ff88; margin: 5px;")
+        cal_layout.addWidget(info_label)
+        
+        # 4ch分の校正ボタン
+        self.calibration_buttons = []
+        self.calibration_status_labels = []
+        
+        for i in range(4):
+            ch_frame = QFrame()
+            ch_frame.setFrameStyle(QFrame.Box)
+            ch_layout = QVBoxLayout(ch_frame)
+            
+            ch_title = QLabel(f"📊 CH{i+1}")
+            ch_title.setFont(QFont("Arial", 10, QFont.Weight.Bold))
+            ch_layout.addWidget(ch_title)
+            
+            button_layout = QHBoxLayout()
+            
+            # 🆕 ゼロ点設定（Tare）ボタン
+            tare_btn = QPushButton(f"🎯 Tare")
+            tare_btn.clicked.connect(lambda checked, ch=i: self.perform_tare(ch))
+            button_layout.addWidget(tare_btn)
+            
+            # 🆕 重量校正ボタン
+            cal_btn = QPushButton(f"⚙️ 校正")
+            cal_btn.clicked.connect(lambda checked, ch=i: self.open_weight_calibration_dialog(ch))
+            button_layout.addWidget(cal_btn)
+            
+            ch_layout.addLayout(button_layout)
+            
+            # 🆕 校正状態表示
+            status_label = QLabel("状態: 未校正\nゼロ点: --\n係数: 1000.0 (初期値)")
+            status_label.setFont(QFont("Arial", 8))
+            ch_layout.addWidget(status_label)
+            
+            self.calibration_buttons.append([tare_btn, cal_btn])
+            self.calibration_status_labels.append(status_label)
+            cal_layout.addWidget(ch_frame)
+        
+        layout.addWidget(cal_group)
+        
+        # 校正データ保存/読み込み
+        file_group = QGroupBox("💾 校正ファイル操作")
+        file_layout = QGridLayout(file_group)
+        
+        self.save_cal_btn = QPushButton("💾 全校正保存")
+        self.load_cal_btn = QPushButton("📂 校正読み込み")
+        
+        self.save_cal_btn.clicked.connect(self.save_calibration_settings)
+        self.load_cal_btn.clicked.connect(self.load_calibration_dialog)
+        
+        file_layout.addWidget(self.save_cal_btn, 0, 0)
+        file_layout.addWidget(self.load_cal_btn, 0, 1)
+        
+        layout.addWidget(file_group)
+        layout.addStretch()
+        return tab
+    
+    def create_data_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
         
         # データ操作
         data_group = QGroupBox("💾 データ操作")
@@ -422,14 +521,41 @@ class LoadCellMonitor(QMainWindow):
         
         layout.addWidget(data_group)
         
+        # データ情報
+        info_group = QGroupBox("ℹ️ データ情報")
+        info_layout = QVBoxLayout(info_group)
+        
+        self.samples_label = QLabel("総サンプル数: 0")
+        self.recording_label = QLabel("記録サンプル数: 0")
+        
+        info_layout.addWidget(self.samples_label)
+        info_layout.addWidget(self.recording_label)
+        
+        layout.addWidget(info_group)
         layout.addStretch()
-        return panel
+        return tab
     
     def setup_dark_theme(self):
         self.setStyleSheet("""
             QMainWindow {
                 background-color: #2b2b2b;
                 color: white;
+            }
+            QTabWidget::pane {
+                border: 2px solid #555555;
+                background-color: #3a3a3a;
+            }
+            QTabBar::tab {
+                background-color: #4a4a4a;
+                color: white;
+                padding: 8px 12px;
+                margin-right: 2px;
+                border-radius: 4px 4px 0 0;
+            }
+            QTabBar::tab:selected {
+                background-color: #00ff88;
+                color: black;
+                font-weight: bold;
             }
             QGroupBox {
                 font-weight: bold;
@@ -471,6 +597,35 @@ class LoadCellMonitor(QMainWindow):
                 padding: 4px;
                 color: white;
             }
+            QCheckBox {
+                color: white;
+                font-weight: bold;
+            }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+            }
+            QCheckBox::indicator:unchecked {
+                border: 2px solid #666666;
+                background-color: #4a4a4a;
+                border-radius: 4px;
+            }
+            QCheckBox::indicator:checked {
+                border: 2px solid #00ff88;
+                background-color: #00ff88;
+                border-radius: 4px;
+            }
+            QFrame {
+                border: 1px solid #555555;
+                border-radius: 4px;
+                background-color: #2b2b2b;
+                margin: 2px;
+                padding: 4px;
+            }
+            QScrollArea {
+                border: none;
+                background-color: #3a3a3a;
+            }
             QStatusBar {
                 background-color: #3a3a3a;
                 color: white;
@@ -484,152 +639,93 @@ class LoadCellMonitor(QMainWindow):
             }
         """)
     
-    def clear_graph(self):
-        """グラフと時間をクリア"""
-        self.buf_t.clear()
-        self.buf_g.clear()
-        self.buf_g_calibrated.clear()
-        self.start_time = time.time()  # 現在時刻でリセット
-        self.plot_widget.clear_plot()
-        self.status_bar.showMessage("グラフをクリアしました - 時間リセット")
+    def toggle_channel(self, channel, state):
+        """チャンネルの有効/無効を切り替え"""
+        self.channel_enabled[channel] = (state == Qt.CheckState.Checked.value)
+        enabled_text = "有効" if self.channel_enabled[channel] else "無効"
+        self.status_bar.showMessage(f"CH{channel+1} を{enabled_text}にしました")
     
-    def apply_calibration(self, raw_value):
-        """校正を適用した値を返す"""
-        if self.calibration_mode == 0:
-            # ゼロ点補正のみ
-            return raw_value - self.zero_offset
-        elif self.calibration_mode == 1:
-            # 1点校正
-            return (raw_value - self.cal_raw_zero) * self.scale_factor
-        elif self.calibration_mode == 2:
-            # 2点校正（線形補間）
-            if self.cal_raw_point2 != self.cal_raw_point1:
-                slope = (self.cal_weight2 - self.cal_weight1) / (self.cal_raw_point2 - self.cal_raw_point1)
-                return self.cal_weight1 + slope * (raw_value - self.cal_raw_point1)
-            else:
-                return raw_value - self.zero_offset
-        else:
-            return raw_value
+    # 🆕 HX711標準校正方式
+    def apply_calibration(self, raw_value, channel):
+        """HX711標準公式でraw値から重量を計算"""
+        return self.calibrations[channel].get_weight(raw_value)
     
-    def perform_zero_calibration(self):
-        """ゼロ点補正を実行"""
-        if len(self.buf_g) < 10:
-            QMessageBox.warning(self, "警告", "十分なデータがありません。接続してデータを取得してください。")
+    def perform_tare(self, channel):
+        """ゼロ点設定（Tare）"""
+        if len(self.buf_raw[channel]) < 10:
+            QMessageBox.warning(self, "警告", f"CH{channel+1}: 十分なデータがありません。")
             return
         
-        # 最新10個のデータの平均をゼロ点とする
-        recent_data = list(self.buf_g)[-10:]
-        self.zero_offset = np.mean(recent_data)
-        self.calibration_mode = 0
-        
-        self.update_calibration_display()
-        
-        QMessageBox.information(self, "完了", f"ゼロ点補正を実行しました。\nオフセット: {self.zero_offset:.3f}")
-        self.status_bar.showMessage("ゼロ点補正完了")
+        try:
+            recent_data = list(self.buf_raw[channel])[-10:]
+            self.calibrations[channel].tare(recent_data)
+            
+            self.update_calibration_display(channel)
+            QMessageBox.information(self, "Tare完了", 
+                f"CH{channel+1} ゼロ点設定完了\n"
+                f"ゼロ点: {self.calibrations[channel].zero_point:.1f}")
+            
+        except ValueError as e:
+            QMessageBox.warning(self, "Tareエラー", str(e))
     
-    def open_calibration_dialog(self):
-        """校正ダイアログを開く"""
-        dialog = CalibrationDialog(self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            settings = dialog.get_calibration_settings()
-            self.perform_calibration(settings)
-    
-    def perform_calibration(self, settings):
-        """校正を実行"""
-        if len(self.buf_g) < 10:
-            QMessageBox.warning(self, "警告", "十分なデータがありません。")
+    def open_weight_calibration_dialog(self, channel):
+        """重量校正ダイアログ"""
+        if not self.calibrations[channel].is_tared:
+            QMessageBox.warning(self, "警告", f"CH{channel+1}: 先にTare（ゼロ点設定）を実行してください。")
             return
         
-        mode = settings['mode']
-        self.calibration_mode = mode
+        # シンプルな重量入力ダイアログ
+        weight, ok = QInputDialog.getDouble(
+            self, f"CH{channel+1} 重量校正", 
+            "既知重量を入力してください (g):", 
+            100.0, 0.1, 10000.0, 1)
         
-        if mode == 0:
-            # ゼロ点補正のみ
-            self.perform_zero_calibration()
-            return
-        
-        # 現在の値を基準点として使用
-        current_raw = np.mean(list(self.buf_g)[-10:])
-        
-        if mode == 1:
-            # 1点校正
-            ret = QMessageBox.question(self, "1点校正", 
-                f"現在、{settings['weight1']:.1f}gの重りを乗せていますか？", 
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if ok:
+            ret = QMessageBox.question(self, "校正確認", 
+                f"CH{channel+1}に{weight:.1f}gの重りを乗せましたか？")
             
             if ret == QMessageBox.StandardButton.Yes:
-                self.cal_raw_zero = self.zero_offset if hasattr(self, 'zero_offset') else 0
-                self.cal_raw_point1 = current_raw
-                self.cal_weight1 = settings['weight1']
-                
-                # スケールファクター計算
-                if (current_raw - self.cal_raw_zero) != 0:
-                    self.scale_factor = self.cal_weight1 / (current_raw - self.cal_raw_zero)
-                else:
-                    QMessageBox.warning(self, "エラー", "校正値の差が0です。ゼロ点補正を先に実行してください。")
-                    return
-                
-                self.update_calibration_display()
-                QMessageBox.information(self, "完了", "1点校正が完了しました。")
-        
-        elif mode == 2:
-            # 2点校正
-            if not hasattr(self, 'cal_raw_point1') or self.cal_raw_point1 == 0:
-                # 1点目の設定
-                ret = QMessageBox.question(self, "2点校正 - 1点目", 
-                    f"現在、{settings['weight1']:.1f}gの重りを乗せていますか？", 
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-                
-                if ret == QMessageBox.StandardButton.Yes:
-                    self.cal_raw_point1 = current_raw
-                    self.cal_weight1 = settings['weight1']
-                    QMessageBox.information(self, "1点目完了", 
-                        f"1点目を記録しました。次に{settings['weight2']:.1f}gの重りに変更してもう一度校正を実行してください。")
-                    return
-            else:
-                # 2点目の設定
-                ret = QMessageBox.question(self, "2点校正 - 2点目", 
-                    f"現在、{settings['weight2']:.1f}gの重りを乗せていますか？", 
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-                
-                if ret == QMessageBox.StandardButton.Yes:
-                    self.cal_raw_point2 = current_raw
-                    self.cal_weight2 = settings['weight2']
-                    
-                    self.update_calibration_display()
-                    QMessageBox.information(self, "完了", "2点校正が完了しました。")
+                self.perform_weight_calibration(channel, weight)
     
-    def save_calibration_settings(self):
-        """校正設定を保存"""
-        if self.calibration_mode == 0 and self.zero_offset == 0:
-            QMessageBox.warning(self, "警告", "保存する校正データがありません")
+    def perform_weight_calibration(self, channel, known_weight):
+        """重量校正実行"""
+        if len(self.buf_raw[channel]) < 10:
+            QMessageBox.warning(self, "警告", f"CH{channel+1}: 十分なデータがありません。")
             return
         
+        try:
+            recent_data = list(self.buf_raw[channel])[-10:]
+            self.calibrations[channel].calibrate_with_weight(recent_data, known_weight)
+            
+            self.update_calibration_display(channel)
+            QMessageBox.information(self, "校正完了", 
+                f"CH{channel+1} 校正完了\n"
+                f"校正係数: {self.calibrations[channel].calibration_factor:.1f}")
+            
+        except ValueError as e:
+            QMessageBox.warning(self, "校正エラー", str(e))
+    
+    def save_calibration_settings(self):
+        """全チャンネルの校正設定を保存"""
         settings = {
-            'calibration_mode': self.calibration_mode,
-            'zero_offset': self.zero_offset,
-            'scale_factor': self.scale_factor,
-            'cal_raw_zero': getattr(self, 'cal_raw_zero', 0.0),
-            'cal_raw_point1': getattr(self, 'cal_raw_point1', 0.0),
-            'cal_raw_point2': getattr(self, 'cal_raw_point2', 0.0),
-            'cal_weight1': self.cal_weight1,
-            'cal_weight2': self.cal_weight2,
+            'channels': [cal.to_dict() for cal in self.calibrations],
+            'channel_enabled': self.channel_enabled,
             'timestamp': datetime.now().isoformat()
         }
         
         filename, _ = QFileDialog.getSaveFileName(
             self, "校正設定を保存", 
-            f"calibration_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+            f"calibration_4ch_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
             "JSON files (*.json)")
         
         if filename:
             try:
                 with open(filename, 'w', encoding='utf-8') as f:
                     json.dump(settings, f, indent=2, ensure_ascii=False)
-                QMessageBox.information(self, "成功", f"校正設定を保存しました: {filename}")
+                QMessageBox.information(self, "成功", f"4ch校正設定を保存しました: {filename}")
                 
                 # デフォルト設定としても保存
-                with open(self.calibration_file, 'w', encoding='utf-8') as f:
+                with open("calibration_4ch_settings.json", 'w', encoding='utf-8') as f:
                     json.dump(settings, f, indent=2, ensure_ascii=False)
                     
             except Exception as e:
@@ -646,8 +742,9 @@ class LoadCellMonitor(QMainWindow):
     
     def load_calibration_settings(self):
         """起動時の校正設定読み込み"""
-        if os.path.exists(self.calibration_file):
-            self.load_calibration_from_file(self.calibration_file)
+        filename = "calibration_4ch_settings.json"
+        if os.path.exists(filename):
+            self.load_calibration_from_file(filename)
     
     def load_calibration_from_file(self, filename):
         """ファイルから校正設定を読み込み"""
@@ -655,42 +752,58 @@ class LoadCellMonitor(QMainWindow):
             with open(filename, 'r', encoding='utf-8') as f:
                 settings = json.load(f)
             
-            self.calibration_mode = settings.get('calibration_mode', 0)
-            self.zero_offset = settings.get('zero_offset', 0.0)
-            self.scale_factor = settings.get('scale_factor', 1.0)
-            self.cal_raw_zero = settings.get('cal_raw_zero', 0.0)
-            self.cal_raw_point1 = settings.get('cal_raw_point1', 0.0)
-            self.cal_raw_point2 = settings.get('cal_raw_point2', 0.0)
-            self.cal_weight1 = settings.get('cal_weight1', 100.0)
-            self.cal_weight2 = settings.get('cal_weight2', 500.0)
+            if 'channels' in settings:
+                for i, cal_data in enumerate(settings['channels']):
+                    if i < 4:
+                        self.calibrations[i].from_dict(cal_data)
             
-            self.update_calibration_display()
+            if 'channel_enabled' in settings:
+                self.channel_enabled = settings['channel_enabled']
+                for i, enabled in enumerate(self.channel_enabled):
+                    if i < len(self.channel_checkboxes):
+                        self.channel_checkboxes[i].setChecked(enabled)
+            
+            # 校正状態表示を更新
+            for ch in range(4):
+                self.update_calibration_display(ch)
             
             timestamp = settings.get('timestamp', 'Unknown')
             QMessageBox.information(self, "読み込み完了", 
-                f"校正設定を読み込みました\n保存日時: {timestamp}")
+                f"4ch校正設定を読み込みました\n保存日時: {timestamp}")
             
         except Exception as e:
             QMessageBox.warning(self, "読み込みエラー", f"校正設定の読み込みに失敗しました: {str(e)}")
     
-    def update_calibration_display(self):
-        """校正状態表示を更新"""
-        if self.calibration_mode == 0:
-            self.cal_status_label.setText("状態: ゼロ点補正済み")
-            self.cal_offset_label.setText(f"オフセット: {self.zero_offset:.3f}")
-            self.cal_scale_label.setText("スケール: 1.0")
-        elif self.calibration_mode == 1:
-            self.cal_status_label.setText("状態: 1点校正済み")
-            self.cal_offset_label.setText(f"オフセット: {self.cal_raw_zero:.3f}")
-            self.cal_scale_label.setText(f"スケール: {self.scale_factor:.6f}")
-        elif self.calibration_mode == 2:
-            self.cal_status_label.setText("状態: 2点校正済み")
-            self.cal_offset_label.setText(f"点1: {self.cal_raw_point1:.3f}→{self.cal_weight1:.1f}g")
-            self.cal_scale_label.setText(f"点2: {self.cal_raw_point2:.3f}→{self.cal_weight2:.1f}g")
+    def update_calibration_display(self, channel):
+        """校正状態表示更新"""
+        cal = self.calibrations[channel]
+        label = self.calibration_status_labels[channel]
+        
+        if cal.is_calibrated:
+            label.setText(
+                f"状態: 校正済み ✅\n"
+                f"ゼロ点: {cal.zero_point:.1f}\n"
+                f"係数: {cal.calibration_factor:.1f}")
+        elif cal.is_tared:
+            label.setText(
+                f"状態: Tare済み 🎯\n"
+                f"ゼロ点: {cal.zero_point:.1f}\n"
+                f"係数: {cal.calibration_factor:.1f} (初期値)")
         else:
-            self.cal_status_label.setText("状態: 未校正")
-            self.cal_offset_label.setText("オフセット: --")
-            self.cal_scale_label.setText("スケール: --")
+            label.setText(
+                f"状態: 未校正 ❌\n"
+                f"ゼロ点: --\n"
+                f"係数: {cal.calibration_factor:.1f} (初期値)")
+    
+    def clear_graph(self):
+        """グラフと時間をクリア"""
+        self.buf_t.clear()
+        for ch in range(4):
+            self.buf_raw[ch].clear()
+            self.buf_calibrated[ch].clear()
+        self.start_time = time.time()
+        self.plot_widget.clear_plot()
+        self.status_bar.showMessage("全グラフをクリア - 時間リセット")
     
     def toggle_connection(self):
         if self.serial_worker and self.serial_worker.isRunning():
@@ -721,31 +834,36 @@ class LoadCellMonitor(QMainWindow):
         self.connect_btn.setStyleSheet("")
         self.status_bar.showMessage("切断されました")
     
-    def on_data_received(self, t, g):
-        # 簡潔で確実な時間管理（接続時間）
+    def on_data_received(self, t, raw_data):
+        """4チャンネル分のデータを受信"""
         current_time = time.time()
         
         if self.start_time is None:
             self.start_time = current_time
         
-        # アプリ起動からの経過時間（秒）
         relative_time = current_time - self.start_time
-        
         self.buf_t.append(relative_time)
-        self.buf_g.append(g)
         
-        # 校正適用
-        g_calibrated = self.apply_calibration(g)
-        self.buf_g_calibrated.append(g_calibrated)
-        
-        if self.is_recording and self.recording_start_time is not None:
-            # 🆕 Windowsタイムスタンプ（高精度）
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        # 4ch分のデータ処理
+        for ch in range(4):
+            raw_value = raw_data[ch]
+            self.buf_raw[ch].append(raw_value)
             
-            # 🆕 記録開始からの経過時間
+            # 🆕 HX711標準校正適用
+            calibrated_value = self.apply_calibration(raw_value, ch)
+            self.buf_calibrated[ch].append(calibrated_value)
+        
+        # 記録処理
+        if self.is_recording and self.recording_start_time is not None:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
             recording_time = current_time - self.recording_start_time
             
-            self.recorded_data.append([timestamp, recording_time, g, g_calibrated])
+            # 全チャンネルのデータを記録
+            row_data = [timestamp, recording_time]
+            for ch in range(4):
+                row_data.extend([raw_data[ch], self.buf_calibrated[ch][-1]])
+            
+            self.recorded_data.append(row_data)
     
     def on_error(self, error_msg):
         QMessageBox.critical(self, "エラー", error_msg)
@@ -755,28 +873,46 @@ class LoadCellMonitor(QMainWindow):
         if not self.buf_t:
             return
         
-        # 表示範囲のデータ抽出（校正済みデータを使用）
+        # 表示範囲のデータ抽出
         tmax = self.buf_t[-1]
         tmin = max(0, tmax - self.window_sec)
         
         x_data = [t for t in self.buf_t if t >= tmin]
-        y_data_raw = list(self.buf_g_calibrated)[len(self.buf_t)-len(x_data):]
+        
+        # 4ch分の表示データ準備
+        y_data_channels = []
+        for ch in range(4):
+            if self.channel_enabled[ch]:
+                y_data = list(self.buf_calibrated[ch])[len(self.buf_t)-len(x_data):]
+            else:
+                y_data = []
+            y_data_channels.append(y_data)
         
         # プロット更新
-        self.plot_widget.update_plot(x_data, y_data_raw, self.window_sec)
+        self.plot_widget.update_plot(x_data, y_data_channels, self.window_sec, self.channel_enabled)
         
-        # 統計更新（校正済みデータ）
-        if y_data_raw:
-            current = y_data_raw[-1]
-            maximum = max(y_data_raw)
-            minimum = min(y_data_raw)
-            average = np.mean(y_data_raw)
-            
-            self.current_label.setText(f"現在値: {current:.2f} g")
-            self.max_label.setText(f"最大値: {maximum:.2f} g")
-            self.min_label.setText(f"最小値: {minimum:.2f} g")
-            self.avg_label.setText(f"平均値: {average:.2f} g")
-            self.samples_label.setText(f"サンプル数: {len(self.buf_g)}")
+        # 統計更新
+        for ch in range(4):
+            if self.channel_enabled[ch] and y_data_channels[ch]:
+                y_data = y_data_channels[ch]
+                current = y_data[-1]
+                maximum = max(y_data)
+                minimum = min(y_data)
+                average = np.mean(y_data)
+                
+                labels = self.stats_labels[ch]
+                labels['current'].setText(f"現在値: {current:.2f} g")
+                labels['max'].setText(f"最大値: {maximum:.2f} g")
+                labels['min'].setText(f"最小値: {minimum:.2f} g")
+                labels['avg'].setText(f"平均値: {average:.2f} g")
+            else:
+                labels = self.stats_labels[ch]
+                for label in labels.values():
+                    label.setText("-- g")
+        
+        # サンプル数更新
+        self.samples_label.setText(f"総サンプル数: {len(self.buf_t)}")
+        self.recording_label.setText(f"記録サンプル数: {len(self.recorded_data)}")
     
     def update_window_size(self):
         self.window_sec = self.window_spin.value()
@@ -787,11 +923,11 @@ class LoadCellMonitor(QMainWindow):
             self.record_btn.setText("🔴 記録開始")
             self.record_btn.setStyleSheet("")
             self.status_bar.showMessage("記録停止")
-            self.recording_start_time = None  # 🆕 記録時間をリセット
+            self.recording_start_time = None
         else:
             self.is_recording = True
             self.recorded_data = []
-            self.recording_start_time = time.time()  # 🆕 記録開始時刻を記録
+            self.recording_start_time = time.time()
             self.record_btn.setText("⏹️ 記録停止")
             self.record_btn.setStyleSheet("background-color: #ff4444;")
             self.status_bar.showMessage("記録中...")
@@ -802,17 +938,20 @@ class LoadCellMonitor(QMainWindow):
             return
         
         filename, _ = QFileDialog.getSaveFileName(
-            self, "データを保存", f"loadcell_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            self, "4chデータを保存", f"loadcell_4ch_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
             "CSV files (*.csv)")
         
         if filename:
             try:
                 with open(filename, 'w', newline='', encoding='utf-8-sig') as f:
                     writer = csv.writer(f)
-                    # 🆕 より分かりやすいヘッダー
-                    writer.writerow(['Windows_Timestamp', 'Recording_Time_s', 'Raw_Value', 'Calibrated_g'])
+                    # 4ch対応ヘッダー
+                    header = ['Windows_Timestamp', 'Recording_Time_s']
+                    for ch in range(4):
+                        header.extend([f'Raw_CH{ch+1}', f'Calibrated_CH{ch+1}_g'])
+                    writer.writerow(header)
                     writer.writerows(self.recorded_data)
-                QMessageBox.information(self, "成功", f"データを保存しました: {filename}")
+                QMessageBox.information(self, "成功", f"4chデータを保存しました: {filename}")
             except Exception as e:
                 QMessageBox.critical(self, "エラー", f"保存に失敗しました: {str(e)}")
     
@@ -820,10 +959,11 @@ class LoadCellMonitor(QMainWindow):
         reply = QMessageBox.question(self, "確認", "全てのデータをクリアしますか？")
         if reply == QMessageBox.StandardButton.Yes:
             self.buf_t.clear()
-            self.buf_g.clear()
-            self.buf_g_calibrated.clear()
+            for ch in range(4):
+                self.buf_raw[ch].clear()
+                self.buf_calibrated[ch].clear()
             self.recorded_data = []
-            self.status_bar.showMessage("データをクリアしました")
+            self.status_bar.showMessage("全データをクリアしました")
     
     def closeEvent(self, event):
         self.disconnect_serial()
@@ -831,16 +971,16 @@ class LoadCellMonitor(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
-    app.setStyle('Fusion')  # モダンなスタイル
+    app.setStyle('Fusion')
     
-    # 日本語フォント設定（確実に存在するフォントを使用）
+    # 日本語フォント設定
     font = QFont()
     if sys.platform == "win32":
-        font.setFamily("MS UI Gothic")  # Windowsで確実に存在
+        font.setFamily("MS UI Gothic")
     elif sys.platform == "darwin":
-        font.setFamily("Arial Unicode MS")  # macOSで確実に存在
+        font.setFamily("Arial Unicode MS")
     else:
-        font.setFamily("DejaVu Sans")  # Linuxで確実に存在
+        font.setFamily("DejaVu Sans")
     app.setFont(font)
     
     window = LoadCellMonitor()
