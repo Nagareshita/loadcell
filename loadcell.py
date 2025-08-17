@@ -167,7 +167,7 @@ class MultiChannelPlotWidget(FigureCanvas):
             ax = self.fig.add_subplot(2, 2, i+1, facecolor='#1e1e1e')
             ax.set_xlabel('時間 [秒]', fontsize=10, color='white')
             ax.set_ylabel('荷重 [g]', fontsize=10, color='white')
-            ax.set_title(f'CH{i+1} リアルタイム荷重', fontsize=12, color='white')
+            ax.set_title(f'CH{i+1} 荷重', fontsize=12, color='white')
             
             # グリッドとスパイン
             ax.grid(True, alpha=0.3, color='#555555')
@@ -409,7 +409,7 @@ class LoadCellMonitor(QMainWindow):
         layout.addWidget(channel_group)
         
         # 統計表示（4ch分）
-        stats_group = QGroupBox("📈 リアルタイム統計")
+        stats_group = QGroupBox("📈 統計")
         stats_layout = QVBoxLayout(stats_group)
         
         # スクロールエリア
@@ -675,7 +675,7 @@ class LoadCellMonitor(QMainWindow):
         return self.calibrations[channel].get_weight(raw_value)
     
     def perform_tare(self, channel):
-        """ゼロ点設定（Tare）- リアルタイムデータ収集版"""
+        """ゼロ点設定（Tare）- データ収集版"""
         if not self.serial_worker or not self.serial_worker.isRunning():
             QMessageBox.warning(self, "警告", "シリアル接続がありません")
             return
@@ -693,7 +693,7 @@ class LoadCellMonitor(QMainWindow):
         self.start_calibration_data_collection(channel, 'tare')
     
     def open_weight_calibration_dialog(self, channel):
-        """重量校正ダイアログ - リアルタイムデータ収集版"""
+        """重量校正ダイアログ - データ収集版"""
         if not self.calibrations[channel].is_tared:
             QMessageBox.warning(self, "警告", f"CH{channel+1}: 先にTare（ゼロ点設定）を実行してください。")
             return
