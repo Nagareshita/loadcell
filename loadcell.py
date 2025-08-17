@@ -14,7 +14,8 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QHBoxLayo
                                QSpinBox, QGroupBox, QGridLayout, QFileDialog,
                                QMessageBox, QStatusBar, QSplitter, QFrame,
                                QDoubleSpinBox, QButtonGroup, QRadioButton, QDialog,
-                               QCheckBox, QTabWidget, QTextEdit, QScrollArea, QInputDialog)
+                               QCheckBox, QTabWidget, QTextEdit, QScrollArea, QInputDialog,
+                               QProgressDialog)
 from PySide6.QtCore import QTimer, Qt, Signal, QThread
 from PySide6.QtGui import QFont, QIcon, QPalette, QColor
 
@@ -36,12 +37,21 @@ class ChannelCalibration:
         self.is_tared = False          # ゼロ点設定済みフラグ
     
     def tare(self, raw_values):
-        """ゼロ点設定（風袋引き）"""
+        """ゼロ点設定（風袋引き） - デバッグ版"""
+        print(f"★ ChannelCalibration.tare() 開始")
+        print(f"★ raw_values長さ: {len(raw_values)}")
+        print(f"★ raw_valuesサンプル: {raw_values[:5] if len(raw_values) >= 5 else raw_values}")
+        
         if len(raw_values) < 5:
+            print(f"★ エラー: データが不足しています")
             raise ValueError("データが不足しています")
         
         self.zero_point = np.mean(raw_values)
+        print(f"★ 計算されたゼロ点: {self.zero_point}")
+        
         self.is_tared = True
+        print(f"★ is_taredフラグ設定: {self.is_tared}")
+        print(f"★ ChannelCalibration.tare() 完了")
         
     def calibrate_with_weight(self, raw_values, known_weight):
         """既知重量での校正"""
@@ -243,6 +253,16 @@ class LoadCellMonitor(QMainWindow):
         
         # 🆕 HX711標準校正方式対応
         self.calibrations = [ChannelCalibration() for _ in range(4)]
+        
+        # 🆕 校正用データ収集
+        self.calibration_data_buffer = []
+        self.calibration_timer = QTimer()
+        self.calibration_timer.timeout.connect(self.collect_calibration_data)
+        self.calibration_progress = None
+        self.calibration_mode = None  # 'tare' or 'weight'
+        self.calibration_channel = None
+        self.calibration_known_weight = None
+        self.calibration_samples_needed = 60  # 3秒 × 20Hz = 60サンプル
         
         # 時間管理
         self.start_time = None
@@ -637,6 +657,10 @@ class LoadCellMonitor(QMainWindow):
                 background-color: #2b2b2b;
                 color: white;
             }
+            QProgressDialog {
+                background-color: #2b2b2b;
+                color: white;
+            }
         """)
     
     def toggle_channel(self, channel, state):
@@ -651,59 +675,182 @@ class LoadCellMonitor(QMainWindow):
         return self.calibrations[channel].get_weight(raw_value)
     
     def perform_tare(self, channel):
-        """ゼロ点設定（Tare）"""
-        if len(self.buf_raw[channel]) < 10:
-            QMessageBox.warning(self, "警告", f"CH{channel+1}: 十分なデータがありません。")
+        """ゼロ点設定（Tare）- リアルタイムデータ収集版"""
+        if not self.serial_worker or not self.serial_worker.isRunning():
+            QMessageBox.warning(self, "警告", "シリアル接続がありません")
             return
         
-        try:
-            recent_data = list(self.buf_raw[channel])[-10:]
-            self.calibrations[channel].tare(recent_data)
-            
-            self.update_calibration_display(channel)
-            QMessageBox.information(self, "Tare完了", 
-                f"CH{channel+1} ゼロ点設定完了\n"
-                f"ゼロ点: {self.calibrations[channel].zero_point:.1f}")
-            
-        except ValueError as e:
-            QMessageBox.warning(self, "Tareエラー", str(e))
+        # 確認ダイアログ
+        ret = QMessageBox.question(self, "Tare確認", 
+            f"CH{channel+1}のTareを実行します。\n"
+            "ロードセルに何も乗せない状態にしてください。\n"
+            "準備ができたらOKを押してください。")
+        
+        if ret != QMessageBox.StandardButton.Yes:
+            return
+        
+        # データ収集開始
+        self.start_calibration_data_collection(channel, 'tare')
     
     def open_weight_calibration_dialog(self, channel):
-        """重量校正ダイアログ"""
+        """重量校正ダイアログ - リアルタイムデータ収集版"""
         if not self.calibrations[channel].is_tared:
             QMessageBox.warning(self, "警告", f"CH{channel+1}: 先にTare（ゼロ点設定）を実行してください。")
             return
         
-        # シンプルな重量入力ダイアログ
+        if not self.serial_worker or not self.serial_worker.isRunning():
+            QMessageBox.warning(self, "警告", "シリアル接続がありません")
+            return
+        
+        # 重量入力
         weight, ok = QInputDialog.getDouble(
             self, f"CH{channel+1} 重量校正", 
             "既知重量を入力してください (g):", 
             100.0, 0.1, 10000.0, 1)
         
-        if ok:
-            ret = QMessageBox.question(self, "校正確認", 
-                f"CH{channel+1}に{weight:.1f}gの重りを乗せましたか？")
-            
-            if ret == QMessageBox.StandardButton.Yes:
-                self.perform_weight_calibration(channel, weight)
+        if not ok:
+            return
+        
+        # 確認ダイアログ
+        ret = QMessageBox.question(self, "校正確認", 
+            f"CH{channel+1}に{weight:.1f}gの重りを乗せてください。\n"
+            "重りを安定して乗せた状態で、OKを押してください。")
+        
+        if ret != QMessageBox.StandardButton.Yes:
+            return
+        
+        # データ収集開始
+        self.start_calibration_data_collection(channel, 'weight', weight)
     
-    def perform_weight_calibration(self, channel, known_weight):
-        """重量校正実行"""
-        if len(self.buf_raw[channel]) < 10:
-            QMessageBox.warning(self, "警告", f"CH{channel+1}: 十分なデータがありません。")
+    def start_calibration_data_collection(self, channel, mode, known_weight=None):
+        """校正用データ収集開始 - 修正版"""
+        self.calibration_channel = channel
+        self.calibration_mode = mode
+        self.calibration_known_weight = known_weight
+        self.calibration_data_buffer = []
+        
+        # プログレスダイアログ
+        mode_text = "Tare" if mode == 'tare' else f"{known_weight:.1f}g校正"
+        self.calibration_progress = QProgressDialog(
+            f"CH{channel+1} {mode_text} データ収集中...\n"
+            "ロードセルを動かさないでください", 
+            "キャンセル", 0, self.calibration_samples_needed, self)
+        self.calibration_progress.setWindowTitle("校正データ収集")
+        self.calibration_progress.setModal(True)
+        
+        # 🆕 自動閉じを無効化
+        self.calibration_progress.setAutoClose(False)
+        self.calibration_progress.setAutoReset(False)
+        
+        # キャンセルボタンのみ手動で接続
+        self.calibration_progress.canceled.connect(self.cancel_calibration)
+        
+        # タイマー開始
+        self.calibration_timer.start(50)  # 20Hz
+        self.calibration_progress.show()
+    
+    def collect_calibration_data(self):
+        """校正用データ収集（タイマーコールバック）"""
+        if not self.buf_raw[self.calibration_channel]:
+            return
+        
+        # 最新のrawデータを取得
+        latest_raw = self.buf_raw[self.calibration_channel][-1]
+        self.calibration_data_buffer.append(latest_raw)
+        
+        # プログレス更新
+        if self.calibration_progress:
+            self.calibration_progress.setValue(len(self.calibration_data_buffer))
+        
+        # 十分なデータが集まったら処理
+        if len(self.calibration_data_buffer) >= self.calibration_samples_needed:
+            self.finish_calibration()
+    
+    def finish_calibration(self):
+        """校正処理完了 - 修正版"""
+        print(f"finish_calibration開始: mode='{self.calibration_mode}', channel={self.calibration_channel}")
+        print(f"収集データ数: {len(self.calibration_data_buffer)}")
+        
+        self.calibration_timer.stop()
+        
+        # 🆕 プログレスダイアログを手動で閉じる
+        if self.calibration_progress:
+            self.calibration_progress.canceled.disconnect()  # シグナル切断
+            self.calibration_progress.close()
+            self.calibration_progress = None
+        
+        # ここで calibration_mode が None でないことを確認
+        if self.calibration_mode is None:
+            print("エラー: calibration_mode が None です")
             return
         
         try:
-            recent_data = list(self.buf_raw[channel])[-10:]
-            self.calibrations[channel].calibrate_with_weight(recent_data, known_weight)
-            
-            self.update_calibration_display(channel)
-            QMessageBox.information(self, "校正完了", 
-                f"CH{channel+1} 校正完了\n"
-                f"校正係数: {self.calibrations[channel].calibration_factor:.1f}")
-            
+            if self.calibration_mode == 'tare':
+                print(f"★ Tare処理分岐に入りました")
+                print(f"収集データサンプル: {self.calibration_data_buffer[:5]}...")
+                
+                # Tare処理
+                print(f"★ tare()メソッド呼び出し前")
+                self.calibrations[self.calibration_channel].tare(self.calibration_data_buffer)
+                print(f"★ tare()メソッド呼び出し後")
+                
+                print(f"Tare処理完了。is_tared: {self.calibrations[self.calibration_channel].is_tared}")
+                print(f"ゼロ点: {self.calibrations[self.calibration_channel].zero_point}")
+                
+                print(f"★ 表示更新前")
+                self.update_calibration_display(self.calibration_channel)
+                print(f"★ 表示更新後")
+                
+                QMessageBox.information(self, "Tare完了", 
+                    f"CH{self.calibration_channel+1} ゼロ点設定完了\n"
+                    f"収集サンプル数: {len(self.calibration_data_buffer)}\n"
+                    f"ゼロ点: {self.calibrations[self.calibration_channel].zero_point:.1f}")
+                
+            elif self.calibration_mode == 'weight':
+                print(f"★ 重量校正処理分岐に入りました")
+                # 重量校正処理
+                self.calibrations[self.calibration_channel].calibrate_with_weight(
+                    self.calibration_data_buffer, self.calibration_known_weight)
+                print(f"重量校正処理完了。is_calibrated: {self.calibrations[self.calibration_channel].is_calibrated}")
+                
+                self.update_calibration_display(self.calibration_channel)
+                
+                QMessageBox.information(self, "校正完了", 
+                    f"CH{self.calibration_channel+1} 校正完了\n"
+                    f"収集サンプル数: {len(self.calibration_data_buffer)}\n"
+                    f"校正係数: {self.calibrations[self.calibration_channel].calibration_factor:.1f}")
+            else:
+                print(f"★ 予期しない calibration_mode: '{self.calibration_mode}'")
+                    
         except ValueError as e:
+            print(f"校正エラー (ValueError): {str(e)}")
             QMessageBox.warning(self, "校正エラー", str(e))
+        except Exception as e:
+            print(f"予期しないエラー: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "エラー", f"予期しないエラー: {str(e)}")
+        
+        # クリーンアップ
+        self.calibration_data_buffer = []
+        self.calibration_mode = None
+        self.calibration_channel = None
+        self.calibration_known_weight = None
+        print(f"finish_calibration完了")
+    
+    def cancel_calibration(self):
+        """校正キャンセル - デバッグ版"""
+        print("★ cancel_calibration が呼ばれました")
+        self.calibration_timer.stop()
+        self.calibration_data_buffer = []
+        self.calibration_mode = None
+        self.calibration_channel = None
+        self.calibration_known_weight = None
+        
+        if self.calibration_progress:
+            self.calibration_progress.close()
+            self.calibration_progress = None
+        print("★ cancel_calibration 完了")
     
     def save_calibration_settings(self):
         """全チャンネルの校正設定を保存"""
@@ -966,6 +1113,10 @@ class LoadCellMonitor(QMainWindow):
             self.status_bar.showMessage("全データをクリアしました")
     
     def closeEvent(self, event):
+        # 校正中の場合はキャンセル
+        if self.calibration_timer.isActive():
+            self.cancel_calibration()
+        
         self.disconnect_serial()
         event.accept()
 
